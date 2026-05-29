@@ -1,6 +1,8 @@
 # MD 转 Word 📝→📄
 
 > 基于 [Cherry Studio](https://github.com/CherryHQ/cherry-studio) 开源代码的 Markdown 转 Word 文档工具
+>
+> **项目地址：** https://github.com/hu568/md-to-word
 
 将 Markdown 文件（`.md`）一键转换为 Word 文档（`.docx`），支持标题、表格、代码块、列表等**常见 Markdown 语法**，保留整洁的排版风格。
 
