@@ -36,10 +36,6 @@ GNU Affero 通用公共许可证（AGPL-3.0）的条款重新分发和/或修改
 import argparse
 import os
 import sys
-
-import argparse
-import os
-import sys
 from typing import List, Optional
 
 from docx import Document
@@ -50,9 +46,17 @@ from docx.oxml import parse_xml
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
+# 图片后处理模块 — 将 [图片: ...] 占位符替换为真实图片
+try:
+    from embed_images import process_docx as embed_images_process
+    HAS_EMBED_IMAGES = True
+except ImportError:
+    HAS_EMBED_IMAGES = False
+
 
 def process_inline_tokens(tokens: List[Token], paragraph, base_font_size: int = 12,
-                          base_font_name: str = '微软雅黑', is_header: bool = False) -> None:
+                          base_font_name: str = '微软雅黑', is_header: bool = False,
+                          md_source_path: str = None) -> None:
     """
     处理内联 token（粗体、斜体、代码、链接、删除线等）
     参考 Cherry Studio ExportService.processInlineTokens()
@@ -151,9 +155,26 @@ def process_inline_tokens(tokens: List[Token], paragraph, base_font_size: int = 
                     run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
                     run.font.size = Pt(10)
             else:
-                run = paragraph.add_run(f'[图片: {alt or src}]')
-                run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
-                run.font.size = Pt(10)
+                # 图片不存在，先尝试相对于MD源文件路径解析
+                found = False
+                if src and md_source_path:
+                    md_dir = os.path.dirname(os.path.abspath(md_source_path))
+                    alt_paths = [
+                        os.path.join(md_dir, src),
+                        os.path.join(md_dir, 'images', os.path.basename(src)),
+                    ]
+                    for ap in alt_paths:
+                        if os.path.exists(ap):
+                            try:
+                                paragraph.add_run().add_picture(ap, width=Inches(4))
+                                found = True
+                                break
+                            except Exception:
+                                pass
+                if not found:
+                    run = paragraph.add_run(f'[图片: {alt or src}]')
+                    run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+                    run.font.size = Pt(10)
             i += 1
             continue
         elif token.type == 'softbreak' or token.type == 'hardbreak':
@@ -180,10 +201,18 @@ def apply_code_block_shading(paragraph):
     pPr.append(shd)
 
 
-def convert_markdown_to_docx(markdown_text: str, output_path: str):
+def convert_markdown_to_docx(markdown_text: str, output_path: str,
+                              md_source_path: str = None) -> str:
     """
     核心转换函数
     将 Markdown 文本转换为 Word 文档并保存
+
+    参数:
+        markdown_text: Markdown 文本内容
+        output_path: 输出 Word 文件路径
+        md_source_path: 源 Markdown 文件路径（用于解析图片路径，可选）
+
+    返回: 输出文件路径
     """
     # 初始化解析器
     md = MarkdownIt('default', {'maxNesting': 20})
@@ -216,10 +245,43 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str):
 
         # === 段落 ===
         if token.type == 'paragraph_open':
-            para = doc.add_paragraph()
             inline_tokens = tokens[i + 1].children if tokens[i + 1].type == 'inline' and tokens[i + 1].children else []
-            if inline_tokens:
-                process_inline_tokens(inline_tokens, para)
+            if inline_tokens and inline_tokens[0].type == 'image':
+                # 图片段落特殊处理：支持 ![alt](src)<br>*图注* 格式
+                # 以第一个 hardbreak/softbreak 或 <br> 文本为界，拆成图片段落和图注段落
+                break_pos = None
+                for idx, t in enumerate(inline_tokens):
+                    if t.type in ('hardbreak', 'softbreak') or (t.type == 'text' and t.content.strip() in ('<br>', '<br/>', '<br />')):
+                        break_pos = idx
+                        break
+
+                if break_pos is not None and break_pos + 1 < len(inline_tokens):
+                    # 分拆：图片部分 [0:break_pos]，图注部分 [break_pos+1:]
+                    img_tokens = inline_tokens[:break_pos]
+                    cap_tokens = inline_tokens[break_pos + 1:]
+
+                    # 图片段落（居中）
+                    img_para = doc.add_paragraph()
+                    img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    process_inline_tokens(img_tokens, img_para, md_source_path=md_source_path)
+
+                    # 图注段落（居中、小字号）
+                    cap_para = doc.add_paragraph()
+                    cap_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    process_inline_tokens(cap_tokens, cap_para, base_font_size=10, md_source_path=md_source_path)
+                    for run in cap_para.runs:
+                        run.font.size = Pt(10)
+                        if not run.italic:
+                            run.italic = True
+                else:
+                    # 仅有图片，无图注 → 居中显示
+                    para = doc.add_paragraph()
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path)
+            else:
+                para = doc.add_paragraph()
+                if inline_tokens:
+                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path)
             i += 3  # 跳过 inline + paragraph_close
             continue
 
@@ -358,8 +420,14 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str):
                     i += 1
                     while i < len(tokens) and tokens[i].type != 'tr_close':
                         if tokens[i].type in ('th_open', 'td_open'):
-                            cell_content = tokens[i + 1].content if i + 1 < len(tokens) and tokens[i + 1].type == 'inline' else ''
-                            row_cells.append(cell_content)
+                            inline_tok = tokens[i + 1] if i + 1 < len(tokens) else None
+                            if inline_tok and inline_tok.type == 'inline':
+                                row_cells.append({
+                                    'text': inline_tok.content,
+                                    'children': inline_tok.children,
+                                })
+                            else:
+                                row_cells.append({'text': '', 'children': None})
                             i += 3
                         else:
                             i += 1
@@ -377,17 +445,28 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str):
                 if num_cols > 0 and num_rows > 0:
                     table = doc.add_table(rows=num_rows, cols=num_cols, style='Table Grid')
                     for row_idx, row_data in enumerate(table_data):
-                        for col_idx, cell_text in enumerate(row_data['cells']):
+                        for col_idx, cell_data in enumerate(row_data['cells']):
                             if col_idx < num_cols:
                                 cell = table.cell(row_idx, col_idx)
                                 cell.text = ''
                                 para = cell.paragraphs[0]
-                                run = para.add_run(cell_text)
-                                run.font.size = Pt(11)
-                                run.font.name = '微软雅黑'
-                                run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
-                                if row_data['is_header']:
-                                    run.bold = True
+                                # 如果有子token（含加粗/斜体等格式），用 process_inline_tokens 处理
+                                children = cell_data.get('children') if isinstance(cell_data, dict) else None
+                                if children:
+                                    process_inline_tokens(
+                                        children, para,
+                                        base_font_size=11,
+                                        base_font_name='微软雅黑',
+                                        is_header=row_data['is_header'],
+                                    )
+                                else:
+                                    cell_text = cell_data.get('text', str(cell_data)) if isinstance(cell_data, dict) else str(cell_data)
+                                    run = para.add_run(cell_text)
+                                    run.font.size = Pt(11)
+                                    run.font.name = '微软雅黑'
+                                    run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+                                    if row_data['is_header']:
+                                        run.bold = True
                                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
                     # 三线表样式：顶部和底部加粗边框
@@ -404,6 +483,34 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str):
     # 保存文档
     doc.save(output_path)
     print(f'[OK] Word document saved to: {output_path}')
+
+    # ===== 图片后处理 =====
+    # 检查原始 Markdown 是否包含图片引用
+    if md_source_path and HAS_EMBED_IMAGES and '[图片:' in markdown_text or '![image' in markdown_text.lower() or '.jpg' in markdown_text.lower() or '.png' in markdown_text.lower():
+        has_images = False
+        md_lower = markdown_text.lower()
+        for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+            if ext in md_lower and '[' in md_lower[:md_lower.index(ext) + 10] if ext in md_lower else False:
+                has_images = True
+                break
+        # 更简单的检查: 是否包含 ![ 语法或 [图片: 占位符
+        if '![' in markdown_text:
+            has_images = True
+        if '[图片:' in markdown_text:
+            has_images = True
+
+        if has_images:
+            print(f'  [INFO] 检测到图片引用，启动图片后处理...')
+            try:
+                img_dir = os.path.join(os.path.dirname(os.path.abspath(md_source_path)), 'images')
+                if os.path.isdir(img_dir):
+                    embed_images_process(output_path, img_dir=img_dir, md_path=md_source_path)
+                else:
+                    embed_images_process(output_path, md_path=md_source_path)
+            except Exception as e:
+                print(f'  [WARN] 图片后处理失败: {e}')
+    # ====================
+
     return output_path
 
 
@@ -427,6 +534,7 @@ def main():
     if args.inline:
         markdown_text = args.inline.replace('\\n', '\n')
         output_path = args.input or 'output.docx'
+        convert_markdown_to_docx(markdown_text, output_path)
     elif args.input and os.path.exists(args.input):
         with open(args.input, 'r', encoding='utf-8') as f:
             markdown_text = f.read()
@@ -435,11 +543,7 @@ def main():
         else:
             base = os.path.splitext(args.input)[0]
             output_path = base + '.docx'
-    else:
-        parser.print_help()
-        sys.exit(1)
-
-    convert_markdown_to_docx(markdown_text, output_path)
+        convert_markdown_to_docx(markdown_text, output_path, md_source_path=args.input)
 
 
 if __name__ == '__main__':

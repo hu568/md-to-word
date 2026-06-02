@@ -4,7 +4,7 @@
 >
 > **项目地址：** https://github.com/hu568/md-to-word
 
-将 Markdown 文件（`.md`）一键转换为 Word 文档（`.docx`），支持标题、表格、代码块、列表等**常见 Markdown 语法**，保留整洁的排版风格。
+将 Markdown 文件（`.md`）一键转换为 Word 文档（`.docx`），支持标题、表格、代码块、列表、图片嵌入等**常见 Markdown 语法**，保留整洁的排版风格。
 
 ## ✨ 功能特性
 
@@ -18,7 +18,8 @@
 | `| 表格 |` | 三线表风格（表头加粗） |
 | `> 引用` | 左侧灰线 + 斜体灰色文字 |
 | `[超链接](url)` | 蓝色下划线样式 |
-| `![图片](path)` | 内嵌图片（本地路径） |
+| `![图片](path)` | 内嵌图片（居中显示） |
+| `![alt](path)<br>*图注*` | 图片居中 + 图注换行居中显示（小号斜体） |
 | `---` 分割线 | 居中虚线 |
 | `- [x]` 任务列表 | 支持识别（转为无序列表） |
 
@@ -40,13 +41,29 @@ pip install python-docx markdown-it-py
 
 **文件转换：**
 ```bash
-python md_to_word.py input.md                     # 在同目录生成 input.docx
-python md_to_word.py input.md output.docx          # 指定输出路径
+python scripts/md_to_word.py input.md                     # 在同目录生成 input.docx
+python scripts/md_to_word.py input.md output.docx          # 指定输出路径
 ```
 
 **直接传字符串：**
 ```bash
-python md_to_word.py --inline "# Hello\n\n**粗体**内容" hello.docx
+python scripts/md_to_word.py --inline "# Hello\n\n**粗体**内容" hello.docx
+```
+
+## 🖼️ 图片与图注
+
+支持 `![alt](path.jpg)<br>*▲ 图注文字*` 格式，自动将图片居中显示，图注换行至下一段并设为小号斜体居中。
+
+转换效果：
+- **图片段落** → 居中显示
+- **图注段落** → 居中显示，小号斜体字
+
+### 图片路径查找顺序
+
+```
+1. Markdown 中指定的原始路径
+2. MD 源文件同目录下的相对路径
+3. MD 源文件同目录下的 images/ 子目录
 ```
 
 ## 🏗️ 实现原理
@@ -64,21 +81,26 @@ markdown-it-py 解析为 Token 流
     │
     ▼
 生成 .docx 文件
+    │
+    ▼
+图片后处理（可选）：扫描占位符，嵌入真实图片
 ```
 
 - **解析层** — 使用 `markdown-it-py`（与 Cherry Studio 使用的 `markdown-it` JS 版同一标准）
 - **构建层** — 使用 `python-docx` 构建 Word 文档元素
 - **表格风格** — 三线表设计（表头粗体、顶部/底部边框）
+- **图片策略** — 两阶段处理：主转换直接嵌入 + 后处理脚本替换占位符
 
 ## 📁 项目结构
 
 ```
 md-to-word/
-├── LICENSE              # AGPL-3.0 协议
-├── README.md            # 本文件
-├── SKILL.md             # CherryStudio Skill 描述
+├── LICENSE                  # AGPL-3.0 协议
+├── README.md                # 本文件
+├── SKILL.md                 # CherryStudio Skill 描述
 └── scripts/
-    └── md_to_word.py    # 核心转换脚本 (~400行)
+    ├── md_to_word.py        # 核心转换脚本（主逻辑）
+    └── embed_images.py      # 图片后处理模块（替换占位符）
 ```
 
 ## 📜 开源协议
@@ -88,8 +110,8 @@ md-to-word/
 本作品参考了 [Cherry Studio](https://github.com/CherryHQ/cherry-studio)（AGPL-3.0）的 `ExportService.ts` 实现思路，并从 TypeScript (Electron) 移植到了 Python 3。
 
 根据 AGPL-3.0 第5节要求：
-- ✅ 修改时间：2026年5月
-- ✅ 修改内容：语言移植（TS → Python），依赖库替换，移除 Electron 依赖，改为命令行界面
+- ✅ 修改时间：2026年6月
+- ✅ 修改内容：语言移植（TS → Python），依赖库替换，移除 Electron 依赖，改为命令行界面，增加图片居中与图注排版支持
 - ✅ 本作品同样以 AGPL-3.0 协议发布
 
 ## 🙏 致谢
