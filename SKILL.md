@@ -13,10 +13,11 @@ description: |
 参考 [Cherry Studio 开源实现](https://github.com/CherryHQ/cherry-studio) 思路，使用 `markdown-it-py` 解析 Markdown 为 token，再用 `python-docx` 生成 Word 文档。
 
 ## 依赖
-- `python-docx` (~1.2.0) — 已安装
-- `markdown-it-py` (~4.0.0) — 已安装
-- `latex2mathml` (~3.81.0) — 已安装（LaTeX 公式 → MathML）
-- `mathml2omml` (~0.0.2) — 已安装（MathML → OMML）
+>call agent :安装完成后请标记
+- `python-docx` (~1.2.0) — 
+- `markdown-it-py` (~4.0.0) — 
+- `latex2mathml` (~3.81.0) — （LaTeX 公式 → MathML）
+- `mathml2omml` (~0.0.2) — （MathML → OMML）
 
 ## 使用方法
 
