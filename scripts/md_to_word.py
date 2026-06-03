@@ -35,16 +35,26 @@ GNU Affero 通用公共许可证（AGPL-3.0）的条款重新分发和/或修改
 
 import argparse
 import os
+import re
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml, OxmlElement
+from lxml import etree
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
+
+# LaTeX 公式转换（md2word 思路：LaTeX → MathML → OMML）
+try:
+    from latex2mathml.converter import convert as latex_to_mathml
+    import mathml2omml
+    HAS_LATEX = True
+except ImportError:
+    HAS_LATEX = False
 
 # 图片后处理模块 — 将 [图片: ...] 占位符替换为真实图片
 try:
@@ -53,10 +63,146 @@ try:
 except ImportError:
     HAS_EMBED_IMAGES = False
 
+# ── LaTeX 公式支持 ─────────────────────────────────────────────
+# 参考 md2word (chenningling/MD2Word) 的转换管线：
+#   LaTeX → MathJax/MathML → OMML (Office Math Markup Language)
+# 对应 Python 实现：
+#   latex2mathml → mathml2omml → python-docx OMML 注入
+
+MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+MATH_BLOCK_PREFIX = '§MATH_B'
+MATH_INLINE_PREFIX = '§MATH_I'
+# 注意：使用 § (U+00A7) 作为前缀，markdown-it-py 视为普通文本
+# 注册 OMML 命名空间
+etree.register_namespace('m', MATH_NS)
+
+
+def extract_latex(text: str) -> tuple:
+    """
+    从 Markdown 中提取 LaTeX 公式，替换为占位符。
+    先保护代码块/行内代码，再提取 $$...$$ 和 $...$。
+
+    返回: (处理后的文本, {占位符: {'latex': str, 'display': bool}})
+    """
+    formulas = {}
+    block_n = [0]
+    inline_n = [0]
+
+    # 第〇步：保护代码块和行内代码，避免 $$ 和 $ 被误提取
+    code_spans = {}  # {占位符: 原始代码}
+    cn = [0]
+
+    # 保护代码块 ```...```
+    def protect_fence(m):
+        key = f'§CODE_{cn[0]}§'
+        code_spans[key] = m.group(0)
+        cn[0] += 1
+        return key
+
+    text = re.sub(r'```.+?```', protect_fence, text, flags=re.DOTALL)
+
+    # 保护行内代码 `...`
+    def protect_code(m):
+        key = f'§CODE_{cn[0]}§'
+        code_spans[key] = m.group(0)
+        cn[0] += 1
+        return key
+
+    text = re.sub(r'`[^`]+`', protect_code, text)
+
+    # 第一步：块级公式 $$...$$
+    def replace_block(m):
+        key = f'{MATH_BLOCK_PREFIX}{block_n[0]}§'
+        formulas[key] = {'latex': m.group(1).strip(), 'display': True}
+        block_n[0] += 1
+        return key
+
+    text = re.sub(r'\$\$(.+?)\$\$', replace_block, text, flags=re.DOTALL)
+
+    # 第二步：行内公式 $...$（避开 $$）
+    def replace_inline(m):
+        key = f'{MATH_INLINE_PREFIX}{inline_n[0]}§'
+        formulas[key] = {'latex': m.group(1).strip(), 'display': False}
+        inline_n[0] += 1
+        return key
+
+    text = re.sub(r'(?<!\$)\$(.+?)\$(?!\$)', replace_inline, text)
+
+    # 第三步：恢复被保护的代码块
+    for key, original in code_spans.items():
+        text = text.replace(key, original)
+
+    return text, formulas
+
+
+def latex_to_omml_elem(latex_str: str) -> OxmlElement:
+    """将 LaTeX 字符串转换为 OMML OxmlElement"""
+    mathml = latex_to_mathml(latex_str)
+    omml_str = mathml2omml.convert(mathml)
+    if 'xmlns:m' not in omml_str:
+        omml_str = omml_str.replace('<m:oMath',
+                                     f'<m:oMath xmlns:m="{MATH_NS}"')
+    return parse_xml(omml_str)
+
+
+def insert_inline_equation(paragraph, latex_str: str) -> bool:
+    """在段落末尾插入行内公式，返回是否成功"""
+    try:
+        omml_elem = latex_to_omml_elem(latex_str)
+        paragraph._element.append(omml_elem)
+        return True
+    except Exception as e:
+        run = paragraph.add_run(f'[{latex_str}]')
+        run.font.italic = True
+        run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+        run.font.size = Pt(10)
+        return False
+
+
+def insert_display_equation(paragraph, latex_str: str) -> bool:
+    """插入块级公式（居中 oMathPara），返回是否成功"""
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        omath_para = etree.SubElement(paragraph._element,
+                                       f'{{{MATH_NS}}}oMathPara')
+        omml_elem = latex_to_omml_elem(latex_str)
+        omath_para.append(omml_elem)
+        return True
+    except Exception as e:
+        run = paragraph.add_run(f'[{latex_str}]')
+        run.font.italic = True
+        run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+        run.font.size = Pt(10)
+        return False
+
+
+def split_text_by_placeholders(text: str, math_formulas: Dict) -> list:
+    """
+    将含有数学占位符的文本拆分成段。
+    返回: [(文本片段, 是否为占位符)]
+    """
+    segments = []
+    pattern = re.compile(r'§(MATH_[BI]\d+)§')
+    last_end = 0
+    for m in pattern.finditer(text):
+        start, end = m.start(), m.end()
+        if start > last_end:
+            segments.append((text[last_end:start], False))
+        key = m.group(0)
+        if key in math_formulas:
+            segments.append((math_formulas[key]['latex'], True))
+        else:
+            segments.append((key, False))
+        last_end = end
+    if last_end < len(text):
+        segments.append((text[last_end:], False))
+    return segments
+
 
 def process_inline_tokens(tokens: List[Token], paragraph, base_font_size: int = 12,
                           base_font_name: str = '微软雅黑', is_header: bool = False,
-                          md_source_path: str = None) -> None:
+                          md_source_path: str = None,
+                          math_formulas: Dict = None) -> None:
     """
     处理内联 token（粗体、斜体、代码、链接、删除线等）
     参考 Cherry Studio ExportService.processInlineTokens()
@@ -138,21 +284,41 @@ def process_inline_tokens(tokens: List[Token], paragraph, base_font_size: int = 
             continue
         elif token.type == 'text':
             text = token.content
-            font_size = Pt(10) if (bold_count > 0 or italic_count > 0) else Pt(base_font_size)
-            run = paragraph.add_run(text)
-            run.font.size = font_size
-            run.font.name = base_font_name
-            run._element.rPr.rFonts.set(qn('w:eastAsia'), base_font_name)
-            if bold_count > 0 or is_header:
-                run.bold = True
-            if italic_count > 0:
-                run.italic = True
-            if strikethrough:
-                run.font.strike = True
-            if inside_link and link_url:
-                # 用蓝色下划线样式表示超链接
-                run.font.color.rgb = RGBColor(0x00, 0x00, 0xFF)
-                run.underline = True
+            # 检查是否包含数学公式占位符
+            if math_formulas and re.search(r'§(MATH_[BI]\d+)§', text):
+                segments = split_text_by_placeholders(text, math_formulas)
+                for seg_text, is_formula in segments:
+                    if is_formula:
+                        insert_inline_equation(paragraph, seg_text)
+                    else:
+                        run = paragraph.add_run(seg_text)
+                        run.font.size = Pt(base_font_size)
+                        run.font.name = base_font_name
+                        run._element.rPr.rFonts.set(qn('w:eastAsia'), base_font_name)
+                        if bold_count > 0 or is_header:
+                            run.bold = True
+                        if italic_count > 0:
+                            run.italic = True
+                        if strikethrough:
+                            run.font.strike = True
+                        if inside_link and link_url:
+                            run.font.color.rgb = RGBColor(0x00, 0x00, 0xFF)
+                            run.underline = True
+            else:
+                font_size = Pt(10) if (bold_count > 0 or italic_count > 0) else Pt(base_font_size)
+                run = paragraph.add_run(text)
+                run.font.size = font_size
+                run.font.name = base_font_name
+                run._element.rPr.rFonts.set(qn('w:eastAsia'), base_font_name)
+                if bold_count > 0 or is_header:
+                    run.bold = True
+                if italic_count > 0:
+                    run.italic = True
+                if strikethrough:
+                    run.font.strike = True
+                if inside_link and link_url:
+                    run.font.color.rgb = RGBColor(0x00, 0x00, 0xFF)
+                    run.underline = True
             i += 1
             continue
         elif token.type == 'code_inline':
@@ -241,6 +407,11 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
 
     返回: 输出文件路径
     """
+    # 预提取 LaTeX 公式（在 Markdown 解析之前）
+    math_formulas = {}
+    if HAS_LATEX:
+        markdown_text, math_formulas = extract_latex(markdown_text)
+
     # 初始化解析器
     md = MarkdownIt('default', {'maxNesting': 20})
     tokens = md.parse(markdown_text)
@@ -261,9 +432,22 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
         # === 标题 ===
         if token.type == 'heading_open':
             level = int(token.tag[1])  # 1-6
-            heading_text = tokens[i + 1].content if tokens[i + 1].type == 'inline' else ''
-            heading = doc.add_heading(heading_text, level=level)
-            # 设置为微软雅黑字体
+            inline_tok = tokens[i + 1] if i + 1 < len(tokens) else None
+            heading_text = inline_tok.content if inline_tok and inline_tok.type == 'inline' else ''
+            heading = doc.add_heading('', level=level)
+
+            # 判断标题中是否含公式
+            if inline_tok and inline_tok.type == 'inline' and inline_tok.children:
+                process_inline_tokens(inline_tok.children, heading,
+                                       base_font_size=16 - level,
+                                       is_header=True,
+                                       math_formulas=math_formulas)
+            else:
+                run = heading.add_run(heading_text)
+                run.font.name = '微软雅黑'
+                run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+
+            # 设置微软雅黑
             for run in heading.runs:
                 run.font.name = '微软雅黑'
                 run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
@@ -272,10 +456,33 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
 
         # === 段落 ===
         if token.type == 'paragraph_open':
-            inline_tokens = tokens[i + 1].children if tokens[i + 1].type == 'inline' and tokens[i + 1].children else []
+            inline_tok = tokens[i + 1] if i + 1 < len(tokens) else None
+            inline_tokens = inline_tok.children if inline_tok and inline_tok.type == 'inline' and inline_tok.children else []
+
+            # 检查是否为块级公式段落
+            if math_formulas and inline_tok and inline_tok.type == 'inline':
+                raw_text = inline_tok.content
+                block_math_match = re.search(r'§MATH_B\d+§', raw_text)
+                if block_math_match:
+                    # 纯块级公式段落
+                    para = doc.add_paragraph()
+                    has_equation = False
+                    for seg_text, is_formula in split_text_by_placeholders(raw_text, math_formulas):
+                        if is_formula:
+                            insert_display_equation(para, seg_text)
+                            has_equation = True
+                        elif seg_text.strip():
+                            run = para.add_run(seg_text)
+                            run.font.size = Pt(12)
+                            run.font.name = '微软雅黑'
+                            run._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
+                    if has_equation:
+                        i += 3
+                        continue
+
+            # 图片段落特殊处理
             if inline_tokens and inline_tokens[0].type == 'image':
                 # 图片段落特殊处理：支持 ![alt](src)<br>*图注* 格式
-                # 以第一个 hardbreak/softbreak 或 <br> 文本为界，拆成图片段落和图注段落
                 break_pos = None
                 for idx, t in enumerate(inline_tokens):
                     if t.type in ('hardbreak', 'softbreak') or (t.type == 'text' and t.content.strip() in ('<br>', '<br/>', '<br />')):
@@ -283,32 +490,33 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
                         break
 
                 if break_pos is not None and break_pos + 1 < len(inline_tokens):
-                    # 分拆：图片部分 [0:break_pos]，图注部分 [break_pos+1:]
                     img_tokens = inline_tokens[:break_pos]
                     cap_tokens = inline_tokens[break_pos + 1:]
 
-                    # 图片段落（居中）
                     img_para = doc.add_paragraph()
                     img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    process_inline_tokens(img_tokens, img_para, md_source_path=md_source_path)
+                    process_inline_tokens(img_tokens, img_para, md_source_path=md_source_path,
+                                           math_formulas=math_formulas)
 
-                    # 图注段落（居中、小字号）
                     cap_para = doc.add_paragraph()
                     cap_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    process_inline_tokens(cap_tokens, cap_para, base_font_size=10, md_source_path=md_source_path)
+                    process_inline_tokens(cap_tokens, cap_para, base_font_size=10,
+                                           md_source_path=md_source_path,
+                                           math_formulas=math_formulas)
                     for run in cap_para.runs:
                         run.font.size = Pt(10)
                         if not run.italic:
                             run.italic = True
                 else:
-                    # 仅有图片，无图注 → 居中显示
                     para = doc.add_paragraph()
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path)
+                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path,
+                                           math_formulas=math_formulas)
             else:
                 para = doc.add_paragraph()
                 if inline_tokens:
-                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path)
+                    process_inline_tokens(inline_tokens, para, md_source_path=md_source_path,
+                                           math_formulas=math_formulas)
             i += 3  # 跳过 inline + paragraph_close
             continue
 
@@ -347,7 +555,8 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
                         para = doc.add_paragraph()
                         # 左边距 + 左边框
                         para.paragraph_format.left_indent = Inches(0.5)
-                        process_inline_tokens(inline_tok.children, para)
+                        process_inline_tokens(inline_tok.children, para,
+                                               math_formulas=math_formulas)
                         for run in para.runs:
                             run.font.size = Pt(11)
                             run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
@@ -370,11 +579,13 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
                             inline_tok = tokens[i + 1]
                             if inline_tok.type == 'inline' and inline_tok.children:
                                 para = doc.add_paragraph(style='List Bullet')
-                                process_inline_tokens(inline_tok.children, para, base_font_size=11)
+                                process_inline_tokens(inline_tok.children, para, base_font_size=11,
+                                                       math_formulas=math_formulas)
                             i += 3
                         elif tokens[i].type == 'inline' and tokens[i].children:
                             para = doc.add_paragraph(style='List Bullet')
-                            process_inline_tokens(tokens[i].children, para, base_font_size=11)
+                            process_inline_tokens(tokens[i].children, para, base_font_size=11,
+                                                   math_formulas=math_formulas)
                             i += 1
                             while i < len(tokens) and tokens[i].type not in ('list_item_close', 'bullet_list_close'):
                                 if tokens[i].type == 'paragraph_close':
@@ -401,11 +612,13 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
                             inline_tok = tokens[i + 1]
                             if inline_tok.type == 'inline' and inline_tok.children:
                                 para = doc.add_paragraph(style='List Number')
-                                process_inline_tokens(inline_tok.children, para, base_font_size=11)
+                                process_inline_tokens(inline_tok.children, para, base_font_size=11,
+                                                       math_formulas=math_formulas)
                             i += 3
                         elif tokens[i].type == 'inline' and tokens[i].children:
                             para = doc.add_paragraph(style='List Number')
-                            process_inline_tokens(tokens[i].children, para, base_font_size=11)
+                            process_inline_tokens(tokens[i].children, para, base_font_size=11,
+                                                   math_formulas=math_formulas)
                             i += 1
                             while i < len(tokens) and tokens[i].type not in ('list_item_close', 'ordered_list_close'):
                                 if tokens[i].type == 'paragraph_close':
@@ -485,6 +698,7 @@ def convert_markdown_to_docx(markdown_text: str, output_path: str,
                                         base_font_size=11,
                                         base_font_name='微软雅黑',
                                         is_header=row_data['is_header'],
+                                        math_formulas=math_formulas,
                                     )
                                 else:
                                     cell_text = cell_data.get('text', str(cell_data)) if isinstance(cell_data, dict) else str(cell_data)

@@ -15,6 +15,8 @@ description: |
 ## 依赖
 - `python-docx` (~1.2.0) — 已安装
 - `markdown-it-py` (~4.0.0) — 已安装
+- `latex2mathml` (~3.81.0) — 已安装（LaTeX 公式 → MathML）
+- `mathml2omml` (~0.0.2) — 已安装（MathML → OMML）
 
 ## 使用方法
 
@@ -45,6 +47,7 @@ python "scripts/md_to_word.py" --inline "<markdown字符串>" output.docx
 | `[text](url)` | 超链接 |
 | `![alt](local_path)` | 图片（本地路径自动嵌入，支持图注） |
 | `~~text~~` | 删除线 |
+| `$...$` / `$$...$$` | LaTeX 数学公式（Word 原生 OMML 公式） |
 
 ## 图片处理
 
@@ -69,6 +72,50 @@ python "scripts/md_to_word.py" --inline "<markdown字符串>" output.docx
 3. MD 源文件同目录下的 images/ 子目录
 4. 指定的 --img-dir 参数目录
 ```
+
+## LaTeX 数学公式支持
+
+本技能现在支持 LaTeX 数学公式转换为 **Word 原生 OMML 公式**（可直接在 Word 中编辑和渲染）。
+
+### 支持的公式语法
+
+| 格式 | 说明 | 示例 |
+|------|------|------|
+| `$...$` | 行内公式 | `$E=mc^2$` |
+| `$$...$$` | 块级公式（居中显示） | `$$\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$$` |
+
+### 支持的 LaTeX 语法
+
+- 基本运算：`+` `-` `\times` `\div` `\pm`
+- 上下标：`x^2` `x_n`
+- 分式：`\frac{a}{b}`
+- 根式：`\sqrt{x}` `\sqrt[n]{x}`
+- 求和/积分/极限：`\sum` `\int` `\lim` `\prod`
+- 矩阵：`\begin{bmatrix} a & b \\ c & d \end{bmatrix}`
+- 希腊字母：`\alpha` `\beta` `\gamma` `\pi` `\infty` 等
+- 三角函数：`\sin` `\cos` `\tan`
+- 括号：`\left(` `\right)`
+- 矢量：`\mathbf{E}` `\vec{v}`
+- 更多标准 LaTeX 数学环境
+
+### 转换原理
+
+采用 **md2word** 的转换管线思路：
+
+```
+LaTeX 公式文本
+  ↓ latex2mathml (Python 库)
+MathML (数学标记语言)
+  ↓ mathml2omml (Python 库)
+OMML (Office Math Markup Language, Word 原生格式)
+  ↓ 注入 python-docx
+Word 文档中的可编辑公式
+```
+
+- 行内公式 `$...$` → 直接嵌入段落的 `m:oMath` 元素
+- 块级公式 `$$...$$` → 创建居中对齐的 `m:oMathPara` 容器
+
+无需调用外部 API，纯本地转换，完全离线可用。
 
 ## 项目文件
 
@@ -98,7 +145,6 @@ python "scripts/md_to_word.py" --inline "<markdown字符串>" output.docx
 
 - 表格中的嵌套复杂格式（如表格内代码块）支持有限
 - 图片需要本地文件路径才能嵌入（不支持网络图片下载）
-- 数学公式（LaTeX）暂不支持，建议在 Cherry Studio 中使用其内置导出功能
 - 图片尺寸固定为5英寸宽度，后续可配置
 
 ## 开源协议
