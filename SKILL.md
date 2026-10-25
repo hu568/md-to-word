@@ -3,13 +3,22 @@ metadata:
   repo: "hu568/md-to-word"
   tag: "v1.3.2"
   commit: "a54626677828fab09810b9821a7fcd25f51d822a"
-name: MD转Word
-description: |
+name: md-to-word
+version: 1.3.2
+display_name: MD 转 Word
+display_name_en: Markdown to Word
+description: 将 Markdown 文件（.md）转换为 Word 文档（.docx），支持本地图片自动嵌入、表格、代码块、列表与 LaTeX 公式。触发词：md转word、md转docx、markdown转word、导出word、保存为word。
+description_zh: |
   将 Markdown 文件（.md）转换为 Word 文档（.docx），支持本地图片自动嵌入。
-  支持标题、段落、粗体/斜体、代码块、列表（有序/无序）、表格、超链接、图片（自动嵌入）、引用块、水平线、任务列表等常见 Markdown 语法。
+  支持标题、段落、粗体/斜体、代码块、列表（有序/无序）、表格、超链接、图片（自动嵌入）、引用块、水平线、任务列表，以及 LaTeX 数学公式转 Word 原生可编辑公式（OMML）等常见 Markdown 语法。
   当用户提到"md转word"、"markdown转docx"、"导出为word"、"md文件转换"、"markdown to word"、"保存为word"等时，自动触发此技能。
   当用户需要把笔记、文档、聊天记录等 Markdown 内容转换为 Word 格式时使用。
   **触发关键词**：md转word、md转docx、markdown转word、导出word、保存为word、markdown to word、convert md to docx、生成word文档
+description_en: |
+  Convert Markdown (.md) files into Word (.docx) documents, with automatic embedding of local images.
+  Supports headings, paragraphs, bold/italic, inline code and fenced code blocks, ordered and unordered lists, tables, hyperlinks, local images (embedded automatically), blockquotes, horizontal rules, task lists, and LaTeX math converted to native editable Word equations (OMML).
+  Trigger when the user asks to convert md to word, export Markdown as .docx, save Markdown content as a Word document, or mentions "markdown to word" / "convert md to docx".
+  **Trigger keywords**: md to word, md to docx, markdown to word, export word, save as word, convert md to docx, generate word document
 ---
 
 # MD 转 Word
