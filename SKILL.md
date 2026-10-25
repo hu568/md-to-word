@@ -1,10 +1,10 @@
 ---
 metadata:
   repo: "hu568/md-to-word"
-  tag: "v1.3.2"
+  tag: "v1.3.3"
   commit: "a54626677828fab09810b9821a7fcd25f51d822a"
 name: md-to-word
-version: 1.3.2
+version: 1.3.3
 display_name: MD 转 Word
 display_name_en: Markdown to Word
 description: 将 Markdown 文件（.md）转换为 Word 文档（.docx），支持本地图片自动嵌入、表格、代码块、列表与 LaTeX 公式。触发词：md转word、md转docx、markdown转word、导出word、保存为word。
