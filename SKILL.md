@@ -2,7 +2,7 @@
 metadata:
   repo: "hu568/md-to-word"
   tag: "v1.3.3"
-  commit: "a54626677828fab09810b9821a7fcd25f51d822a"
+  commit: "985b9da2aa34bffb82d926e1d3376585d4486b94"
 name: md-to-word
 version: 1.3.3
 display_name: MD 转 Word
